@@ -5,6 +5,7 @@ import re
 import time
 
 from lib.router import check_dependency
+from lib.utils import slugify, extract_title
 
 
 def fetch_feishu(url, output_dir, no_images=False):
@@ -22,11 +23,11 @@ def fetch_feishu(url, output_dir, no_images=False):
     print(f"[*] Feishu fetch: {url}")
 
     collected_html = []
-    collected_img_urls = []
+    collected_images = {}  # url -> {"b64": data_url} or {} (not yet downloaded)
 
     def scroll_and_collect(page):
         """Scroll through Feishu doc and collect all content blocks."""
-        nonlocal collected_html, collected_img_urls
+        nonlocal collected_html, collected_images
 
         # Wait for content to load
         page.wait_for_selector("[data-content-editable-root]", timeout=30000)
@@ -90,10 +91,14 @@ def fetch_feishu(url, output_dir, no_images=False):
                 Array.from(document.querySelectorAll('img[src]')).map(img => img.src)
                 .filter(src => src.startsWith('http') && !src.includes('data:'))
             """)
-            collected_img_urls.extend(img_srcs)
+            for img_url in img_srcs:
+                if img_url not in collected_images:
+                    collected_images[img_url] = {}
 
             # Download images via browser fetch (cookies needed for 401)
-            for i, img_url in enumerate(img_srcs):
+            for img_url in list(collected_images):
+                if collected_images[img_url].get("b64"):
+                    continue  # already downloaded
                 try:
                     b64_data = page.evaluate("""
                         async (url) => {
@@ -109,7 +114,7 @@ def fetch_feishu(url, output_dir, no_images=False):
                         }
                     """, img_url)
                     if b64_data:
-                        collected_img_urls[i] = ("local", img_url, b64_data)
+                        collected_images[img_url] = {"b64": b64_data}
                 except Exception:
                     pass
 
@@ -142,37 +147,30 @@ def fetch_feishu(url, output_dir, no_images=False):
     md_text = re.sub(r'Unable to print\s*', '', md_text)
 
     # Extract title
-    title = None
-    for line in md_text.split("\n"):
-        line = line.strip()
-        if line.startswith("#"):
-            title = re.sub(r'^#+\s*', '', line).strip()
-            break
-        if line and len(line) > 2:
-            title = line[:80]
-            break
-    slug = _slugify(title) if title else "feishu-doc"
+    title = extract_title(md_text)
+    slug = slugify(title, fallback="feishu-doc") if title else "feishu-doc"
 
     # Save images
     img_dir = os.path.join(output_dir, "images", slug)
-    if not no_images and collected_img_urls:
+    if not no_images and collected_images:
         os.makedirs(img_dir, exist_ok=True)
-        for i, item in enumerate(collected_img_urls):
-            if isinstance(item, tuple) and item[0] == "local":
-                _, orig_url, b64_data = item
-                # Parse data URL
-                match = re.match(r'data:image/(\w+);base64,(.+)', b64_data)
-                if match:
-                    ext = match.group(1)
-                    if ext == "jpeg":
-                        ext = "jpg"
-                    img_data = base64.b64decode(match.group(2))
-                    local_name = f"img_{i:02d}.{ext}"
-                    local_path = os.path.join(img_dir, local_name)
-                    with open(local_path, "wb") as f:
-                        f.write(img_data)
-                    local_ref = os.path.join("images", slug, local_name)
-                    md_text = md_text.replace(orig_url, local_ref)
+        for i, (orig_url, data) in enumerate(collected_images.items()):
+            b64_data = data.get("b64")
+            if not b64_data:
+                continue
+            # Parse data URL
+            match = re.match(r'data:image/(\w+);base64,(.+)', b64_data)
+            if match:
+                ext = match.group(1)
+                if ext == "jpeg":
+                    ext = "jpg"
+                img_data = base64.b64decode(match.group(2))
+                local_name = f"img_{i:02d}.{ext}"
+                local_path = os.path.join(img_dir, local_name)
+                with open(local_path, "wb") as f:
+                    f.write(img_data)
+                local_ref = os.path.join("images", slug, local_name)
+                md_text = md_text.replace(orig_url, local_ref)
 
     md_path = os.path.join(output_dir, f"{slug}.md")
     with open(md_path, "w", encoding="utf-8") as f:
@@ -182,8 +180,3 @@ def fetch_feishu(url, output_dir, no_images=False):
     return md_path
 
 
-def _slugify(title):
-    """Generate filesystem-safe slug from article title."""
-    slug = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', title)
-    slug = re.sub(r'\s+', '-', slug.strip())
-    return slug[:100] if slug else "feishu-doc"

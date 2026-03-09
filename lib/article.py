@@ -7,6 +7,7 @@ import urllib.request
 from urllib.parse import urlparse, urljoin
 
 from lib.router import check_dependency
+from lib.utils import slugify, extract_title
 
 
 def fetch_article(url, output_dir, route_config, no_images=False):
@@ -39,8 +40,8 @@ def fetch_article(url, output_dir, route_config, no_images=False):
     md_text, html_text = result
 
     # Extract title from first heading or first line
-    title = _extract_title(md_text)
-    slug = _slugify(title) if title else "article"
+    title = extract_title(md_text)
+    slug = slugify(title) if title else "article"
 
     # Save markdown
     md_path = os.path.join(output_dir, f"{slug}.md")
@@ -143,10 +144,54 @@ def _fetch_with_camoufox(url, selector):
             h.body_width = 0
             md_text = h.handle(html_text)
 
+            # Readability.js fallback: if extracted content is too thin, inject
+            # Mozilla Readability to pull the main article content from the page.
+            if len(md_text.strip()) < 200:
+                readability_result = _readability_extract(page)
+                if readability_result:
+                    rd_html, rd_title = readability_result
+                    rd_md = h.handle(rd_html)
+                    if len(rd_md.strip()) > len(md_text.strip()):
+                        print("[*] Readability.js extracted better content")
+                        html_text = rd_html
+                        md_text = rd_md
+
             return md_text, html_text
     except Exception as e:
         print(f"[!] Camoufox error: {e}")
         return None
+
+
+def _readability_extract(page):
+    """Inject Readability.js into the page and extract article content.
+
+    Returns (html_content, title) or None on failure.
+    """
+    try:
+        js_path = os.path.join(os.path.dirname(__file__), "readability.js")
+        with open(js_path, "r", encoding="utf-8") as f:
+            readability_js = f.read()
+
+        # Inject Readability constructor, then parse the current document
+        result = page.evaluate("""
+            (readabilityCode) => {
+                eval(readabilityCode);
+                try {
+                    const cloned = document.cloneNode(true);
+                    const article = new Readability(cloned).parse();
+                    if (article && article.content) {
+                        return {content: article.content, title: article.title || ''};
+                    }
+                } catch(e) {}
+                return null;
+            }
+        """, readability_js)
+
+        if result and result.get("content"):
+            return result["content"], result.get("title", "")
+    except Exception as e:
+        print(f"[!] Readability.js injection failed: {e}")
+    return None
 
 
 def _wx_image_hook(md_text, html_text, img_dir):
@@ -164,7 +209,6 @@ def _wx_image_hook(md_text, html_text, img_dir):
         local_path = os.path.join(img_dir, local_name)
 
         if _download_image(img_url, local_path, referer="https://mp.weixin.qq.com/"):
-            rel_path = os.path.relpath(local_path, os.path.dirname(img_dir.rstrip("/")))
             # Replace SVG placeholder or original URL in markdown
             md_text = md_text.replace(img_url, os.path.join("images", os.path.basename(img_dir), local_name))
 
@@ -243,24 +287,6 @@ def _download_image(url, local_path, referer=None):
         print(f"[!] Image download failed: {url} - {e}")
         return False
 
-
-def _extract_title(md_text):
-    """Extract title from first heading or first non-empty line."""
-    for line in md_text.split("\n"):
-        line = line.strip()
-        if line.startswith("#"):
-            return re.sub(r'^#+\s*', '', line).strip()
-        if line and len(line) > 2:
-            return line[:80]
-    return None
-
-
-def _slugify(title):
-    """Generate filesystem-safe slug from article title."""
-    # Keep CJK characters, alphanumeric, spaces/hyphens
-    slug = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', title)
-    slug = re.sub(r'\s+', '-', slug.strip())
-    return slug[:100] if slug else "article"
 
 
 def _guess_ext(url, default="jpg"):
