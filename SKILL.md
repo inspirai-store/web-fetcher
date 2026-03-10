@@ -1,6 +1,8 @@
 ---
 name: web-fetcher
 description: "Smart web content fetcher - articles and videos from WeChat, Feishu, Bilibili, Zhihu, Toutiao, YouTube, etc. Triggers: '抓取文章', '下载网页', '保存文章', 'fetch URL', '下载视频', '抓取飞书文档', '抓取微信文章', '把这个链接内容保存下来', '下载B站视频', 'download video', 'scrape article'."
+version: 0.1.1
+license: MIT
 ---
 
 # Web Fetcher
